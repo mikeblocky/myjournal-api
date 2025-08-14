@@ -1,33 +1,29 @@
 const router = require("express").Router();
 const { authRequired } = require("../middleware/auth");
-const ai = require("../services/ai.service");
 const Article = require("../models/Article");
+const ai = require("../services/ai.service");
 
-router.get("/whoami", (_req, res) => {
-  res.json({
-    provider: (process.env.AI_PROVIDER || "openai").toLowerCase(),
-    base: process.env.AI_API_BASE || "openai:chat",
-    model: process.env.AI_MODEL || process.env.GEMINI_MODEL || null
-  });
-});
+router.use(authRequired);
 
-router.post("/summarize", authRequired, async (req, res) => {
+router.post("/summarize", async (req, res) => {
   try {
-    const { text, mode = "tldr", articleId } = req.body || {};
+    const { text, articleId, mode = "detailed" } = req.body || {};
+    let input = (text || "").trim();
 
-    let input = text;
     if (!input && articleId) {
       const a = await Article.findOne({ _id: articleId, createdBy: req.userId }).lean();
       if (!a) return res.status(404).json({ error: "Article not found" });
-      input = a.contentHTML || `${a.title || ""}. ${a.excerpt || ""}`;
+      input = (a.contentHTML && a.contentHTML.trim()) ||
+              [a.title || "", a.excerpt || ""].filter(Boolean).join(". ");
     }
-    if (!input) return res.status(400).json({ error: "text or articleId required" });
+
+    if (!input) return res.status(400).json({ error: "No text to summarize" });
 
     const summary = await ai.summarize(input, { mode });
-    return res.json({ summary });
+    return res.json({ summary: summary || "" });
   } catch (e) {
-    console.error("ai.summarize failed:", e);
-    return res.status(500).json({ error: "AI failed" });
+    console.error("ai.summarize error:", e);
+    return res.status(500).json({ error: "AI summarize failed" });
   }
 });
 

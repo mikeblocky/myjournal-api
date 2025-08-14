@@ -87,7 +87,7 @@ app.use("/api/journals", journalsRoutes);
 app.use("/api/articles", articlesRoutes);
 app.use("/api/calendar", calendarRoutes);
 app.use("/api/digests", digestsRoutes);
-app.use("/api/ai", aiRoutes);
+app.use("/api/ai", require("./routes/ai.routes"));
 
 /* ---------- 404 + errors ---------- */
 app.use(notFound);
