@@ -5,7 +5,11 @@ const { fetchAndParse } = require("../services/reader.service");
 
 function safeHost(u) { try { return new URL(u).host.replace(/^www\./, ""); } catch { return ""; } }
 function urlKey(u) { try { const x = new URL(u); return (x.origin + x.pathname).toLowerCase(); } catch { return (u || "").toLowerCase(); } }
-
+function pickDefined(obj = {}) {
+  const out = {};
+  for (const k of Object.keys(obj)) if (obj[k] !== undefined && obj[k] !== null) out[k] = obj[k];
+  return out;
+}
 function pub(a) {
   return {
     id: a._id,
@@ -38,9 +42,8 @@ exports.list = async (req, res, next) => {
     if (q)   filter.title = { $regex: esc(q), $options: "i" };
     if (tag) filter.tags = tag;
 
-    // Prefer lastSeenAt (freshness), then updatedAt
     const [items, total] = await Promise.all([
-      Article.find(filter).sort({ lastSeenAt: -1, updatedAt: -1 }).skip((page - 1) * limit).limit(limit),
+      Article.find(filter).sort({ lastSeenAt: -1, updatedAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
       Article.countDocuments(filter),
     ]);
 
@@ -51,7 +54,7 @@ exports.list = async (req, res, next) => {
 /* ---------- GET ONE ---------- */
 exports.getOne = async (req, res, next) => {
   try {
-    const a = await Article.findOne({ _id: req.params.id, createdBy: req.userId });
+    const a = await Article.findOne({ _id: req.params.id, createdBy: req.userId }).lean();
     if (!a) return res.status(404).json({ error: "Not found" });
     res.json({ item: pub(a) });
   } catch (e) { next(e); }
@@ -66,21 +69,19 @@ exports.importByUrl = async (req, res, next) => {
     const parsed = await fetchAndParse(url);
     if (!parsed) return res.status(400).json({ error: "Could not parse article" });
 
-    // Atomic upsert
     const filter = { createdBy: req.userId, url };
-    const now = new Date();
-    const update = {
-      $setOnInsert: {
-        createdBy: req.userId,
-        url,
-        host: safeHost(url),
-        source: "manual",
-      },
-      $set: { ...parsed, tags, lastSeenAt: now },
-    };
-    await Article.updateOne(filter, update, { upsert: true });
+    const set = pickDefined({ ...parsed, tags: Array.isArray(tags) ? tags.filter(Boolean).slice(0, 20) : [] });
 
-    const a = await Article.findOne(filter);
+    const a = await Article.findOneAndUpdate(
+      filter,
+      {
+        $setOnInsert: { createdBy: req.userId, url, host: safeHost(url), source: "manual" },
+        $set: set,
+        $currentDate: { lastSeenAt: true } // <-- only use currentDate for lastSeenAt
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
     res.status(201).json({ item: pub(a) });
   } catch (e) { next(e); }
 };
@@ -88,21 +89,27 @@ exports.importByUrl = async (req, res, next) => {
 /* ---------- UPDATE ---------- */
 exports.update = async (req, res, next) => {
   try {
-    const a = await Article.findOne({ _id: req.params.id, createdBy: req.userId });
+    const id = req.params.id;
+    const a = await Article.findOne({ _id: id, createdBy: req.userId });
     if (!a) return res.status(404).json({ error: "Not found" });
 
     const { title, tags, reparse } = req.body || {};
-    if (typeof title === "string") a.title = title;
-    if (Array.isArray(tags)) a.tags = tags.filter(Boolean).slice(0, 20);
+    const set = {};
+    if (typeof title === "string") set.title = title;
+    if (Array.isArray(tags)) set.tags = tags.filter(Boolean).slice(0, 20);
 
     if (reparse) {
       const parsed = await fetchAndParse(a.url);
-      if (parsed) a.set({ ...parsed, host: a.host || safeHost(a.url) });
+      if (parsed) Object.assign(set, pickDefined(parsed), { host: a.host || safeHost(a.url) });
     }
 
-    a.lastSeenAt = new Date();
-    await a.save();
-    res.json({ item: pub(a) });
+    const out = await Article.findOneAndUpdate(
+      { _id: id, createdBy: req.userId },
+      { $set: set, $currentDate: { lastSeenAt: true } },
+      { new: true }
+    );
+
+    res.json({ item: pub(out) });
   } catch (e) { next(e); }
 };
 
@@ -120,13 +127,11 @@ exports.refresh = async (req, res, next) => {
   try {
     const limit  = Math.max(1, Math.min(100, parseInt(req.query.limit || "48", 10)));
     const force  = (req.query.force === "true" || req.query.force === "1");
-    const topics = String(req.query.topics || "")
-      .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+    const topics = String(req.query.topics || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
 
-    // Pull a broad pool; we'll cap after upserts
     const picks = await fetchNewsItems({ limit: limit * 2, topics });
 
-    // Early de-dupe by normalized URL key
+    // de-dupe by normalized URL key
     const seenKey = new Set();
     const uniq = [];
     for (const p of picks) {
@@ -142,49 +147,64 @@ exports.refresh = async (req, res, next) => {
     for (const p of uniq) {
       const url = p.url;
       const filter = { createdBy: req.userId, url };
-      const now = new Date();
 
       try {
-        const update = {
-          $setOnInsert: {
-            createdBy: req.userId,
-            url,
-            host: safeHost(url),
-            source: p.source || "",
-          },
-          $set: { lastSeenAt: now },
-        };
+        // Check existence first to avoid parsing unless needed
+        const existing = await Article.findOne(filter).select("_id source").lean();
 
-        if (force) {
+        if (!existing) {
           const parsed = await fetchAndParse(url);
-          if (parsed) Object.assign(update.$set, parsed);
-        }
+          if (!parsed) continue;
 
-        // Atomic upsert
-        const result = await Article.updateOne(filter, update, { upsert: true });
+          const set = pickDefined({ ...parsed });
+          const a = await Article.findOneAndUpdate(
+            filter,
+            {
+              $setOnInsert: {
+                createdBy: req.userId,
+                url,
+                host: safeHost(url),
+                source: p.source || ""
+              },
+              $set: set,
+              $currentDate: { lastSeenAt: true } // only here
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+          );
 
-        if (result.upsertedCount) {
           imported++;
-        } else if (force) {
-          updated++;
+          if (a && !outIds.has(String(a._id))) { out.push(pub(a)); outIds.add(String(a._id)); }
         } else {
-          seen++;
+          const set = {};
+          if (!existing.source && p.source) set.source = p.source;
+
+          if (force) {
+            const parsed = await fetchAndParse(url);
+            if (parsed) Object.assign(set, pickDefined(parsed));
+            const a = await Article.findOneAndUpdate(
+              filter,
+              { $set: set, $currentDate: { lastSeenAt: true } },
+              { new: true }
+            );
+            updated++;
+            if (a && !outIds.has(String(a._id))) { out.push(pub(a)); outIds.add(String(a._id)); }
+          } else {
+            const a = await Article.findOneAndUpdate(
+              filter,
+              { $set: set, $currentDate: { lastSeenAt: true } },
+              { new: true }
+            );
+            seen++;
+            if (a && !outIds.has(String(a._id))) { out.push(pub(a)); outIds.add(String(a._id)); }
+          }
         }
 
-        const a = await Article.findOne(filter);
-        if (a && !outIds.has(String(a._id))) {
-          out.push(pub(a));
-          outIds.add(String(a._id));
-        }
         if (out.length >= limit) break;
       } catch (e) {
-        // Swallow duplicate key races gracefully
+        // swallow duplicate key races gracefully
         if (e && (e.code === 11000 || String(e.message).includes("E11000"))) {
           const a = await Article.findOne(filter);
-          if (a && !outIds.has(String(a._id))) {
-            out.push(pub(a));
-            outIds.add(String(a._id));
-          }
+          if (a && !outIds.has(String(a._id))) { out.push(pub(a)); outIds.add(String(a._id)); }
           continue;
         }
         console.error("refresh item failed:", url, e);
