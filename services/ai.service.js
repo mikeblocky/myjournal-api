@@ -1,17 +1,24 @@
 // backend/src/services/ai.service.js
+"use strict";
 
 // ---------- Env & defaults ----------
-const PROVIDER      = (process.env.AI_PROVIDER || "openai").toLowerCase(); // "openai" | "gemini"
-const GEMINI_MODEL  = process.env.GEMINI_MODEL  || "gemini-2.0-flash";
-const OPENAI_MODEL  = process.env.AI_MODEL      || "gpt-4o-mini";
-const OPENAI_BASE   = process.env.AI_API_BASE   || "https://api.openai.com/v1/chat/completions";
+const PROVIDER     = (process.env.AI_PROVIDER || "openai").toLowerCase(); // "openai" | "gemini"
+const GEMINI_MODEL = process.env.GEMINI_MODEL  || "gemini-2.0-flash";
 
-const MAX_INPUT_CHARS   = Number(process.env.AI_MAX_INPUT_CHARS || 16000);
-const TOKENS_TLDR       = Number(process.env.AI_MAX_TOKENS      || 220);
-const TOKENS_DETAILED   = Number(process.env.AI_DETAILED_TOKENS || 480);
-const TOKENS_OUTLINE    = Number(process.env.AI_OUTLINE_TOKENS  || 420);
-const TEMP              = 0.2;
-const AI_DEBUG          = process.env.AI_DEBUG === "true";
+const OPENAI_MODEL = process.env.AI_MODEL     || "gpt-4o-mini";
+const OPENAI_BASE  = process.env.AI_API_BASE  || "https://api.openai.com/v1/chat/completions";
+
+// Optional temperature: only send if AI_TEMPERATURE is set and numeric
+const TEMP_ENV   = process.env.AI_TEMPERATURE;
+const HAS_TEMP   = TEMP_ENV !== undefined && TEMP_ENV !== "" && !Number.isNaN(Number(TEMP_ENV));
+const TEMP_VALUE = HAS_TEMP ? Number(TEMP_ENV) : null;
+
+const MAX_INPUT_CHARS = Number(process.env.AI_MAX_INPUT_CHARS || 16000);
+const TOKENS_TLDR     = Number(process.env.AI_MAX_TOKENS      || 220);
+const TOKENS_DETAILED = Number(process.env.AI_DETAILED_TOKENS || 480);
+const TOKENS_OUTLINE  = Number(process.env.AI_OUTLINE_TOKENS  || 420);
+
+const AI_DEBUG = process.env.AI_DEBUG === "true";
 
 function log(...a){ if (AI_DEBUG) console.log("[AI]", ...a); }
 function logErr(...a){ console.error("[AI]", ...a); }
@@ -19,13 +26,10 @@ function logErr(...a){ console.error("[AI]", ...a); }
 // ---------- Text utils ----------
 function stripHtml(s = "") { return String(s).replace(/<[^>]+>/g, " "); }
 function compress(s = "")  { return String(s).replace(/\s+/g, " ").trim(); }
-function truncate(s = "", n = MAX_INPUT_CHARS) {
-  return s.length > n ? s.slice(0, n - 1) + "…" : s;
-}
+function truncate(s = "", n = MAX_INPUT_CHARS) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
-// ---------- Output normalizers (remove markdown/bullets, tidy) ----------
+// ---------- Output normalizers ----------
 function removeInlineEmphasis(s=""){
-  // remove **bold**, *italics*, __bold__, _italics_
   return s
     .replace(/(\*\*|__)(.*?)\1/g, "$2")
     .replace(/(\*|_)(.*?)\1/g, "$2");
@@ -34,7 +38,6 @@ function removeInlineEmphasis(s=""){
 function normalizeOutline(text){
   let s = String(text || "").replace(/\r\n/g, "\n").trim();
 
-  // normalize bullets to "• "
   s = s
     .replace(/^\s*[\*\-]\s+/gm, "• ")
     .replace(/^\s*•\s+/gm, "• ")
@@ -48,7 +51,6 @@ function normalizeOutline(text){
     .filter(Boolean)
     .map(l => (l[0] ? ("• " + l[0].toUpperCase() + l.slice(1)) : l));
 
-  // dedupe & cap
   const seen = new Set();
   lines = lines.filter(l => { const k = l.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 8);
   return lines.join("\n");
@@ -57,8 +59,8 @@ function normalizeOutline(text){
 function normalizeParagraph(text){
   let s = String(text || "").replace(/\r\n/g, "\n").trim();
   s = s
-    .replace(/^\s*[•\*\-]\s+/gm, "") // remove bullet markers at line starts
-    .replace(/\s\*\s/g, ". ")        // inline star separators → sentence breaks
+    .replace(/^\s*[•\*\-]\s+/gm, "")
+    .replace(/\s\*\s/g, ". ")
     .replace(/\n+/g, " ");
 
   s = removeInlineEmphasis(s);
@@ -113,7 +115,7 @@ async function callGemini(text, { maxTokens }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
     contents: [{ parts: [{ text }] }],
-    generationConfig: { maxOutputTokens: maxTokens, temperature: TEMP }
+    generationConfig: { maxOutputTokens: maxTokens, temperature: 0.2 }
   };
 
   try {
@@ -127,11 +129,9 @@ async function callGemini(text, { maxTokens }) {
     if (!res.ok) { logErr("[Gemini] HTTP", res.status, json); return null; }
 
     const cand   = json?.candidates?.[0];
-    const finish = cand?.finishReason; // may be "STOP" or "MAX_TOKENS"
     const out    = cand?.content?.parts?.map(p => p?.text).filter(Boolean).join("\n").trim();
-
-    // keep partial text even if MAX_TOKENS
     if (out) return out;
+    const finish = cand?.finishReason;
     logErr("[Gemini] finishReason:", finish);
     return null;
   } catch (e) {
@@ -148,82 +148,102 @@ async function callOpenAI(messages, { maxTokens }) {
   const key = process.env.AI_API_KEY;
   if (!key) return null;
 
-  // Responses API
+  async function post(body) {
+    const res  = await fetch(OPENAI_BASE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify(body)
+    });
+    const json = await res.json().catch(() => ({}));
+    return { res, json };
+  }
+
+  // Responses API path
   if (isResponsesAPI()) {
-    const body = {
+    const payload = {
       model: OPENAI_MODEL,
-      input: messages,                   // accepts role/content list
-      temperature: TEMP,
+      input: messages,
       max_output_tokens: maxTokens
     };
-    try {
-      const res  = await fetch(OPENAI_BASE, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify(body)
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) { logErr("[OpenAI][responses] HTTP", res.status, json); return null; }
+    if (TEMP_VALUE !== null) payload.temperature = TEMP_VALUE;
 
+    let { res, json } = await post(payload);
+
+    // If temperature unsupported, retry without it
+    if (!res.ok && json?.error?.param === "temperature") {
+      delete payload.temperature;
+      ({ res, json } = await post(payload));
+    }
+
+    if (res.ok) {
       const out =
         json.output_text ||
         json?.output?.[0]?.content?.[0]?.text ||
         json?.choices?.[0]?.message?.content ||
         "";
-      return out.trim() || null;
-    } catch (e) {
-      logErr("[OpenAI][responses] exception:", e);
-      return null;
-    }
-  }
-
-  // Chat Completions API
-  const basePayload = { model: OPENAI_MODEL, messages, temperature: TEMP };
-
-  try {
-    // 1) Try classic max_tokens
-    let res  = await fetch(OPENAI_BASE, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ ...basePayload, max_tokens: maxTokens })
-    });
-    let json = await res.json().catch(() => ({}));
-    if (res.ok) return json?.choices?.[0]?.message?.content?.trim() || null;
-
-    // 2) If model rejects max_tokens, retry with max_completion_tokens
-    const param  = json?.error?.param || "";
-    const msg    = (json?.error?.message || "").toLowerCase();
-    const badMax = param === "max_tokens" || /max[_ ]tokens/.test(param) || msg.includes("max_tokens");
-    if (res.status === 400 && badMax) {
-      res  = await fetch(OPENAI_BASE, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify({ ...basePayload, max_completion_tokens: maxTokens })
-      });
-      json = await res.json().catch(() => ({}));
-      if (res.ok) return json?.choices?.[0]?.message?.content?.trim() || null;
+      return (out || "").trim() || null;
     }
 
-    // 3) Gentle retry on 429/5xx using max_completion_tokens
+    // Retry on 429/5xx a couple times
     if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
       for (let i = 0; i < 2; i++) {
         await new Promise(r => setTimeout(r, 400 * (i + 1) ** 2));
-        res  = await fetch(OPENAI_BASE, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-          body: JSON.stringify({ ...basePayload, max_completion_tokens: maxTokens })
-        });
-        json = await res.json().catch(() => ({}));
-        if (res.ok) return json?.choices?.[0]?.message?.content?.trim() || null;
+        ({ res, json } = await post(payload));
+        if (res.ok) {
+          const out =
+            json.output_text ||
+            json?.output?.[0]?.content?.[0]?.text ||
+            json?.choices?.[0]?.message?.content ||
+            "";
+          return (out || "").trim() || null;
+        }
       }
     }
 
-    logErr("[OpenAI] HTTP", res.status, json);
-    return null;
-  } catch (e) {
-    logErr("[OpenAI] exception:", e);
+    logErr("[OpenAI][responses] HTTP", res.status, json);
     return null;
   }
+
+  // Chat Completions path
+  const basePayload = { model: OPENAI_MODEL, messages };
+  if (TEMP_VALUE !== null) basePayload.temperature = TEMP_VALUE;
+
+  // 1) try with max_tokens
+  let { res, json } = await post({ ...basePayload, max_tokens: maxTokens });
+
+  // If temperature unsupported → retry without it
+  if (!res.ok && json?.error?.param === "temperature") {
+    const b = { ...basePayload };
+    delete b.temperature;
+    ({ res, json } = await post({ ...b, max_tokens: maxTokens }));
+  }
+
+  if (res.ok) return json?.choices?.[0]?.message?.content?.trim() || null;
+
+  // 2) model rejects max_tokens → use max_completion_tokens
+  const param  = json?.error?.param || "";
+  const msg    = (json?.error?.message || "").toLowerCase();
+  const badMax = param === "max_tokens" || /max[_ ]tokens/.test(param) || msg.includes("max_tokens");
+  if (res.status === 400 && badMax) {
+    let b = { ...basePayload, max_completion_tokens: maxTokens };
+    // if previous error said temperature unsupported, keep it off
+    if (json?.error?.param === "temperature") delete b.temperature;
+
+    ({ res, json } = await post(b));
+    if (res.ok) return json?.choices?.[0]?.message?.content?.trim() || null;
+  }
+
+  // 3) gentle retry for 429/5xx (with max_completion_tokens)
+  if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
+    for (let i = 0; i < 2; i++) {
+      await new Promise(r => setTimeout(r, 400 * (i + 1) ** 2));
+      ({ res, json } = await post({ ...basePayload, max_completion_tokens: maxTokens }));
+      if (res.ok) return json?.choices?.[0]?.message?.content?.trim() || null;
+    }
+  }
+
+  logErr("[OpenAI] HTTP", res.status, json);
+  return null;
 }
 
 // ---------- Local fallback ----------
@@ -241,7 +261,6 @@ function fallbackByMode(text, mode) {
       .filter(i => i >= 0 && i < sents.length);
     return normalizeParagraph(pick.map(i => sents[i]).join(" "));
   }
-  // tldr
   return normalizeParagraph(sents.slice(0, 3).join(" "));
 }
 
@@ -250,9 +269,10 @@ async function summarize(rawText, { mode = "tldr" } = {}) {
   const text = truncate(compress(stripHtml(rawText || "")));
   if (!text) return "";
 
-  const maxTokens = mode === "detailed" ? TOKENS_DETAILED
-                   : mode === "outline" ? TOKENS_OUTLINE
-                   : TOKENS_TLDR;
+  const maxTokens =
+    mode === "detailed" ? TOKENS_DETAILED :
+    mode === "outline"  ? TOKENS_OUTLINE  :
+                          TOKENS_TLDR;
 
   const prompt = buildPrompt(text, mode);
 
@@ -280,7 +300,7 @@ async function topicIdeas(headlines = []) {
 
   const joined = list.slice(0, 12).map((t, i) => `${i + 1}. ${compress(t)}`).join("\n");
   const prompt =
-    `Plain text only. No markdown, no numbering.
+`Plain text only. No markdown, no numbering.
 Give 3 short daily journal prompts, one per line (no bullets). Keep each under 8 words.
 Headlines:
 ${joined}`;
@@ -307,7 +327,6 @@ ${joined}`;
       .filter(Boolean).slice(0, 3);
   }
 
-  // last-resort local prompts
   return list.slice(0, 3).map(t => `Reflect on: ${compress(t)}`);
 }
 
