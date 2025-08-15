@@ -6,7 +6,7 @@ const PROVIDER      = (process.env.AI_PROVIDER || "openai").toLowerCase(); // "o
 const GEMINI_MODEL  = process.env.GEMINI_MODEL  || "gemini-2.0-flash";
 
 const OPENAI_MODEL  = process.env.AI_MODEL      || "gpt-4o-mini";
-const OPENAI_BASE   = process.env.AI_API_BASE   || "https://api.openai.com/v1/chat/completions";
+const OPENAI_BASE   = "https://api.openai.com/v1/chat/completions"; // Force Chat Completions API
 
 // Only include temperature if AI_TEMPERATURE is explicitly set
 const TEMP_ENV      = process.env.AI_TEMPERATURE;
@@ -14,9 +14,9 @@ const HAS_TEMP      = TEMP_ENV !== undefined && TEMP_ENV !== "" && !Number.isNaN
 const TEMP_VALUE    = HAS_TEMP ? Number(TEMP_ENV) : null;
 
 const MAX_INPUT_CHARS = Number(process.env.AI_MAX_INPUT_CHARS || 16000);
-const TOKENS_TLDR     = Number(process.env.AI_MAX_TOKENS      || 220);
-const TOKENS_DETAILED = Number(process.env.AI_DETAILED_TOKENS || 480);
-const TOKENS_OUTLINE  = Number(process.env.AI_OUTLINE_TOKENS  || 420);
+const TOKENS_TLDR     = Number(process.env.AI_MAX_TOKENS      || 150);  // Reduced from 220
+const TOKENS_DETAILED = Number(process.env.AI_DETAILED_TOKENS || 300);  // Reduced from 480
+const TOKENS_OUTLINE  = Number(process.env.AI_OUTLINE_TOKENS  || 250);  // Reduced from 420
 
 const AI_DEBUG = process.env.AI_DEBUG === "true";
 function log(...a){ if (AI_DEBUG) console.log("[AI]", ...a); }
@@ -81,6 +81,8 @@ function normalizeOutput(text, mode){
 /* -------------------- Prompt builder -------------------- */
 function buildPrompt(text, mode) {
   const base =
+    "IMPORTANT: You are summarizing the following text. Do NOT repeat or copy the original text. " +
+    "Create a NEW summary in your own words. " +
     "Plain text only. No markdown or inline formatting (no *, _, #, backticks). " +
     "Use your own wording; do not copy exact phrases or repeat the headline. " +
     "Be neutral, concrete, and specific. No filler.";
@@ -89,20 +91,20 @@ function buildPrompt(text, mode) {
     return `${base}
 Return 5–8 one-line bullets. Prefix each bullet with "• " (Unicode bullet) exactly.
 No sub-bullets. No numbering. No extra commentary.
-Text:
+Text to summarize:
 ${text}`;
   }
   if (mode === "detailed") {
     return `${base}
 Write a clear 120–180 word paragraph covering: what happened, who is involved, where/when, why it matters, what's next.
 One paragraph. No bullets.
-Text:
+Text to summarize:
 ${text}`;
   }
   // tldr
   return `${base}
 Write 2–3 plain sentences (no bullets).
-Text:
+Text to summarize:
 ${text}`;
 }
 
@@ -171,11 +173,40 @@ async function callOpenAI(messages, { maxTokens }) {
     }
 
     if (res.ok) {
-      const out =
-        json.output_text ||
-        json?.output?.[0]?.content?.[0]?.text ||
-        json?.choices?.[0]?.message?.content || "";
-      return (out || "").trim() || null;
+      log("[OpenAI][responses] Response received:", { 
+        model: OPENAI_MODEL, 
+        maxTokens, 
+        response: json 
+      });
+      
+      // Handle the Responses API structure properly
+      let out = "";
+      
+      // Try different possible output locations
+      if (json.output_text) {
+        out = json.output_text;
+      } else if (json.output && Array.isArray(json.output) && json.output.length > 0) {
+        // The output is an array, extract text from it
+        const outputItem = json.output[0];
+        if (outputItem && outputItem.content && Array.isArray(outputItem.content)) {
+          out = outputItem.content.map(c => c.text || "").filter(Boolean).join("\n");
+        } else if (outputItem && outputItem.text) {
+          out = outputItem.text;
+        }
+      } else if (json.choices && json.choices[0] && json.choices[0].message) {
+        out = json.choices[0].message.content;
+      }
+      
+      if (out && out.trim()) {
+        log("[OpenAI][responses] Content extracted:", { 
+          outputLength: out.length, 
+          output: out.substring(0, 100) + "..." 
+        });
+        return out.trim();
+      } else {
+        logErr("[OpenAI][responses] No content found in response. Output structure:", json.output);
+        return null;
+      }
     }
 
     // Retry on 429/5xx
@@ -198,41 +229,46 @@ async function callOpenAI(messages, { maxTokens }) {
   }
 
   // Chat Completions path
-  // Strategy: try max_completion_tokens first (works with gpt-5*), then fall back to max_tokens.
+  // Handle different parameter names for different models
   const basePayload = { model: OPENAI_MODEL, messages };
   if (TEMP_VALUE !== null) basePayload.temperature = TEMP_VALUE;
 
-  // 1) Try with max_completion_tokens
+  // Try max_completion_tokens first (for gpt-5* models)
   let { res, json } = await post({ ...basePayload, max_completion_tokens: maxTokens });
 
-  // If temperature unsupported → retry without it (same param set)
-  if (!res.ok && (json?.error?.param === "temperature" || /temperature/.test(json?.error?.message || ""))) {
-    const b = { ...basePayload };
-    delete b.temperature;
-    ({ res, json } = await post({ ...b, max_completion_tokens: maxTokens }));
+  // If that fails, try max_tokens (for gpt-4* models)
+  if (!res.ok && json?.error?.param === "max_completion_tokens") {
+    ({ res, json } = await post({ ...basePayload, max_tokens: maxTokens }));
   }
 
-  if (res.ok) return json?.choices?.[0]?.message?.content?.trim() || null;
-
-  // 2) Some older models want max_tokens instead
-  const param  = json?.error?.param || "";
-  const msg    = (json?.error?.message || "").toLowerCase();
-  const badMCT = param === "max_completion_tokens" || msg.includes("max_completion_tokens");
-  if (res.status === 400 && badMCT) {
-    let b = { ...basePayload, max_tokens: maxTokens };
-    // if previous error indicated temperature unsupported, keep it off
-    if (param === "temperature" || /temperature/.test(msg)) delete b.temperature;
-
-    ({ res, json } = await post(b));
-    if (res.ok) return json?.choices?.[0]?.message?.content?.trim() || null;
+  if (res.ok) {
+    const content = json?.choices?.[0]?.message?.content;
+    log("[OpenAI] Response received:", { 
+      model: OPENAI_MODEL, 
+      maxTokens, 
+      contentLength: content?.length || 0,
+      usage: json?.usage,
+      choices: json?.choices,
+      firstChoice: json?.choices?.[0]
+    });
+    return content?.trim() || null;
   }
 
-  // 3) Gentle retry for 429/5xx (prefer max_completion_tokens)
+  // Retry on 429/5xx
   if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
     for (let i = 0; i < 2; i++) {
       await new Promise(r => setTimeout(r, 400 * (i + 1) ** 2));
-      ({ res, json } = await post({ ...basePayload, max_completion_tokens: maxTokens }));
-      if (res.ok) return json?.choices?.[0]?.message?.content?.trim() || null;
+      const { res: retryRes, json: retryJson } = await post({ ...basePayload, max_completion_tokens: maxTokens });
+      if (retryRes.ok) {
+        const content = retryJson?.choices?.[0]?.message?.content;
+        log("[OpenAI] Response received (retry):", { 
+          model: OPENAI_MODEL, 
+          maxTokens, 
+          contentLength: content?.length || 0,
+          usage: retryJson?.usage 
+        });
+        return content?.trim() || null;
+      }
     }
   }
 
@@ -269,10 +305,21 @@ async function summarize(rawText, { mode = "tldr" } = {}) {
                           TOKENS_TLDR;
 
   const prompt = buildPrompt(text, mode);
+  
+  log("[AI] Summarizing:", { 
+    mode, 
+    maxTokens, 
+    inputLength: text.length, 
+    provider: PROVIDER,
+    model: OPENAI_MODEL 
+  });
 
   if (PROVIDER === "gemini") {
     const g = await callGemini(prompt, { maxTokens });
-    if (g) return normalizeOutput(g, mode);
+    if (g) {
+      log("[AI] Gemini response:", { outputLength: g.length });
+      return normalizeOutput(g, mode);
+    }
   }
 
   const o = await callOpenAI(
@@ -282,7 +329,11 @@ async function summarize(rawText, { mode = "tldr" } = {}) {
     ],
     { maxTokens }
   );
-  if (o) return normalizeOutput(o, mode);
+  
+  if (o) {
+    log("[AI] OpenAI response:", { outputLength: o.length, output: o.substring(0, 100) + "..." });
+    return normalizeOutput(o, mode);
+  }
 
   log("[fallback] local summarizer");
   return fallbackByMode(text, mode);

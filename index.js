@@ -54,7 +54,9 @@ const configuredList = allowAll
       .filter(Boolean);
 
 function isAllowedOrigin(origin) {
-  if (!origin) return true; // server-to-server / curl
+  // Handle missing or invalid origin
+  if (!origin || typeof origin !== 'string') return false;
+  
   if (allowAll) return true;
 
   // Exact matches
@@ -70,14 +72,20 @@ function isAllowedOrigin(origin) {
 // Add Vary: Origin and set ACAO early so even error responses carry it
 app.use((req, res, next) => {
   const origin = req.headers.origin;
+  
+  // Always set Vary: Origin for proper caching
+  res.setHeader("Vary", "Origin");
+  
   if (isAllowedOrigin(origin)) {
-    res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Origin", allowAll ? "*" : origin);
-    if (!allowAll) {
-      // Only send credentials when we reflect the origin
+    if (allowAll) {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+    } else if (origin) {
+      // Only set ACAO when we have a valid origin
+      res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Access-Control-Allow-Credentials", "true");
     }
   }
+  
   next();
 });
 
@@ -94,7 +102,16 @@ app.use(
 
 // Make sure OPTIONS short-circuits quickly for all paths
 app.options("*", (req, res) => {
-  // When allowAll we already set ACAO:* above; else reflect the origin
+  const origin = req.headers.origin;
+  
+  // Set CORS headers for preflight requests
+  if (allowAll) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else if (origin && isAllowedOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  }
+  
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,PATCH,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   return res.sendStatus(204);

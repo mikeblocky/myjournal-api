@@ -20,7 +20,19 @@ router.post("/summarize", async (req, res) => {
 
     if (!input) return res.status(400).json({ error: "No text to summarize" });
 
+    console.log("[AI Route] Input:", { 
+      mode, 
+      inputLength: input.length, 
+      inputPreview: input.substring(0, 200) + "..." 
+    });
+
     const summary = await ai.summarize(input, { mode });
+    
+    console.log("[AI Route] Summary result:", { 
+      summaryLength: summary?.length || 0, 
+      summary: summary || "NO SUMMARY GENERATED" 
+    });
+
     return res.json({ summary: summary || "" });
   } catch (e) {
     console.error("ai.summarize error:", e);
