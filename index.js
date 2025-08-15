@@ -76,19 +76,9 @@ if (process.env.CORS_ORIGIN) {
 
 console.log("CORS Configuration - Allowed Origins:", allowedOrigins);
 
-// CORS middleware configuration
+// Simple CORS middleware configuration
 app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      console.log(`CORS blocked origin: ${origin}`);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: allowedOrigins,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
@@ -110,6 +100,18 @@ app.use(morgan("dev"));
 app.get("/api/health", (_req, res) =>
   res.json({ ok: true, env: process.env.NODE_ENV || "development" })
 );
+
+// Test CORS endpoint
+app.get("/api/test-cors", (req, res) => {
+  const origin = req.headers.origin;
+  console.log(`Test CORS endpoint - Origin: ${origin}`);
+  res.json({ 
+    message: "CORS test successful", 
+    origin: origin,
+    timestamp: new Date().toISOString(),
+    allowedOrigins: allowedOrigins
+  });
+});
 
 
 app.get("/api/openapi.json", (_req, res) => res.json(spec));
