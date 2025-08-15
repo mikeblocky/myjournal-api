@@ -37,6 +37,7 @@ function removeInlineEmphasis(s=""){
 function normalizeOutline(text){
   let s = String(text || "").replace(/\r\n/g, "\n").trim();
 
+  // First, clean up the input to standardize bullet formats
   s = s
     .replace(/^\s*[\*\-]\s+/gm, "• ")
     .replace(/^\s*•\s+/gm, "• ")
@@ -45,13 +46,32 @@ function normalizeOutline(text){
 
   s = removeInlineEmphasis(s);
 
+  // Split into lines and process each bullet
   let lines = s.split(/\n+/)
-    .map(l => l.replace(/^[\s•\*\-]+\s*/, "").trim())
+    .map(l => l.trim())
     .filter(Boolean)
-    .map(l => (l[0] ? ("• " + l[0].toUpperCase() + l.slice(1)) : l));
+    .map(l => {
+      // Ensure each line starts with a bullet
+      if (!l.startsWith("• ")) {
+        l = "• " + l;
+      }
+      // Capitalize first letter after bullet
+      if (l.length > 2) {
+        l = "• " + l[2].toUpperCase() + l.slice(3);
+      }
+      return l;
+    });
 
+  // Remove duplicates and limit to 8 bullets
   const seen = new Set();
-  lines = lines.filter(l => { const k = l.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 8);
+  lines = lines.filter(l => { 
+    const k = l.toLowerCase(); 
+    if (seen.has(k)) return false; 
+    seen.add(k); 
+    return true; 
+  }).slice(0, 8);
+  
+  // Join with proper line breaks
   return lines.join("\n");
 }
 
@@ -71,8 +91,13 @@ function normalizeParagraph(text){
 function normalizeOutput(text, mode){
   const raw = (text || "").trim();
   if (!raw) return "";
-  if (mode === "outline") return normalizeOutline(raw);
+  
+  if (mode === "outline") {
+    // For outline mode, preserve the bullet structure and line breaks
+    return normalizeOutline(raw);
+  }
 
+  // For other modes, clean up the text
   const looksListy = /^(\s*[•\*\-\d].*)$/m.test(raw) || raw.includes(" * ");
   const cleaned = looksListy ? normalizeParagraph(raw) : removeInlineEmphasis(raw);
   return compress(cleaned);
@@ -89,8 +114,10 @@ function buildPrompt(text, mode) {
 
   if (mode === "outline") {
     return `${base}
-Return 5–8 one-line bullets. Prefix each bullet with "• " (Unicode bullet) exactly.
+Return 5–8 one-line bullets. Each bullet should be on its own line.
+Prefix each bullet with "• " (Unicode bullet) exactly.
 No sub-bullets. No numbering. No extra commentary.
+Each bullet should be a complete, standalone sentence.
 Text to summarize:
 ${text}`;
   }
