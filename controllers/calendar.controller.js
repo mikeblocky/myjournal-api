@@ -121,6 +121,14 @@ async function generateDaily(req, res, next){
     const date = clampYmd(req.params.date || "");
     if (!date) return res.status(400).json({ error: "date required (YYYY-MM-DD)" });
 
+    // Debug: Log the date processing
+    console.log('Calendar Debug - generateDaily:', {
+      originalDate: req.params.date,
+      clampedDate: date,
+      currentTime: new Date().toISOString(),
+      currentLocal: new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York' })
+    });
+
     // Gather events
     const events = await CalendarEvent.find({ createdBy: req.userId, date }).sort({ allDay: -1, startTime: 1 });
     // Gather notes (prefer NoteDaily bullets, else build from Note items)
