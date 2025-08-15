@@ -3,9 +3,16 @@ const CalendarDaily = require("../models/CalendarDaily");
 const Note = require("../models/Note");
 const NoteDaily = require("../models/NoteDaily");
 const { summarize } = require("../services/ai.service");
+const { ymd } = require("../utils/date");
 
 function escRegex(s=""){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-function clampYmd(s=""){ return String(s).slice(0,10); }
+// Fix date handling to use local timezone instead of UTC
+function clampYmd(s=""){ 
+  if (typeof s === "string") {
+    return s.slice(0,10);
+  }
+  return ymd(s);
+}
 
 function minutes(hhmm=""){
   const m = /^(\d{2}):(\d{2})$/.exec(hhmm || "");

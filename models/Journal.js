@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
+const { ymd } = require("../utils/date");
 
-function ymd(d = new Date()) { return new Date(d).toISOString().slice(0,10); }
 function slugify(s=""){
   return String(s).toLowerCase()
     .replace(/['"]/g,"")

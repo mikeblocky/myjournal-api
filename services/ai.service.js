@@ -36,6 +36,8 @@ function removeInlineEmphasis(s=""){
 
 function normalizeOutline(text){
   let s = String(text || "").replace(/\r\n/g, "\n").trim();
+  
+  log("[normalizeOutline] Input:", { length: s.length, text: s.substring(0, 200) + "..." });
 
   // First, clean up the input to standardize bullet formats
   s = s
@@ -45,6 +47,163 @@ function normalizeOutline(text){
     .replace(/\s\*\s/g, "\n• ");
 
   s = removeInlineEmphasis(s);
+
+  // Handle cases where AI returns text with periods instead of line breaks
+  // Split on periods followed by spaces and common sentence starters
+  if (!s.includes('\n') && s.includes('• ')) {
+    s = s.replace(/\.\s+/g, ".\n");
+  }
+  
+  // If the AI returned a paragraph-like text but we need bullets, try to split on sentence boundaries
+  if (!s.includes('\n') && !s.includes('• ') && s.includes('. ')) {
+    // Split on sentence boundaries and convert to bullets
+    s = s.split(/\.\s+/)
+      .map(sentence => sentence.trim())
+      .filter(sentence => sentence.length > 10) // Only keep meaningful sentences
+      .map(sentence => `• ${sentence}`)
+      .join('\n');
+  }
+  
+  // Handle case where AI returns bullets without line breaks (e.g., "• Point 1. • Point 2. • Point 3")
+  if (s.includes('• ') && !s.includes('\n')) {
+    log("[normalizeOutline] Found bullets without line breaks, fixing...");
+    // Split on bullet markers and ensure each gets its own line
+    s = s.replace(/•\s+/g, '\n• ')
+      .replace(/^\n/, '') // Remove leading newline
+      .trim();
+    log("[normalizeOutline] After fixing line breaks:", { text: s.substring(0, 200) + "..." });
+  }
+  
+  // Handle case where AI returns bullets with periods but no line breaks (e.g., "• Point 1. • Point 2.")
+  if (s.includes('• ') && s.includes('. ') && !s.includes('\n')) {
+    log("[normalizeOutline] Found bullets with periods but no line breaks, fixing...");
+    // First split on bullet markers, then on periods
+    s = s.replace(/•\s+/g, '\n• ')
+      .replace(/^\n/, '') // Remove leading newline
+      .replace(/\.\s+/g, '.\n') // Add line breaks after periods
+      .trim();
+    log("[normalizeOutline] After fixing periods and line breaks:", { text: s.substring(0, 200) + "..." });
+  }
+  
+  // Handle case where AI returns text that looks like a paragraph but contains bullet markers
+  // This is the most common case - AI returns "• Point 1. • Point 2. • Point 3" as one line
+  if (s.includes('• ') && s.includes('. ') && s.split('\n').length === 1) {
+    log("[normalizeOutline] Found paragraph-like text with bullets, converting to proper format...");
+    // Split on bullet markers and ensure proper formatting
+    const bullets = s.split(/•\s+/)
+      .filter(part => part.trim().length > 0)
+      .map(part => {
+        let bullet = part.trim();
+        // Ensure it ends with a period
+        if (!bullet.endsWith('.')) {
+          bullet += '.';
+        }
+        return `• ${bullet}`;
+      });
+    s = bullets.join('\n');
+    log("[normalizeOutline] After converting paragraph to bullets:", { text: s.substring(0, 200) + "..." });
+  }
+  
+  // Handle case where AI returns text with multiple bullet markers on the same line
+  // This can happen when the AI doesn't follow the format properly
+  if (s.includes('• ') && s.split('\n').length === 1 && (s.match(/•/g) || []).length > 1) {
+    log("[normalizeOutline] Found multiple bullets on same line, splitting...");
+    // Split on bullet markers and clean up
+    const bullets = s.split(/•\s+/)
+      .filter(part => part.trim().length > 0)
+      .map(part => {
+        let bullet = part.trim();
+        // Remove any trailing punctuation that might interfere
+        bullet = bullet.replace(/[.!?]+$/, '');
+        // Ensure it ends with a period
+        if (!bullet.endsWith('.') && !bullet.endsWith('!') && !bullet.endsWith('?')) {
+          bullet += '.';
+        }
+        return `• ${bullet}`;
+      });
+    s = bullets.join('\n');
+    log("[normalizeOutline] After splitting multiple bullets:", { text: s.substring(0, 200) + "..." });
+  }
+  
+  // Final cleanup: ensure we have proper line breaks and no extra whitespace
+  s = s.replace(/\n\s+/g, '\n') // Remove leading whitespace on lines
+       .replace(/\s+\n/g, '\n') // Remove trailing whitespace on lines
+       .replace(/\n{3,}/g, '\n\n') // Limit consecutive newlines to max 2
+       .trim();
+  
+  // If we still don't have proper line breaks, try to split on sentence boundaries
+  if (!s.includes('\n') && s.includes('. ')) {
+    log("[normalizeOutline] Still no line breaks, trying sentence-based splitting...");
+    const sentences = s.split(/\.\s+/)
+      .map(sentence => sentence.trim())
+      .filter(sentence => sentence.length > 10)
+      .map(sentence => `• ${sentence}.`);
+    s = sentences.join('\n');
+    log("[normalizeOutline] After sentence-based splitting:", { text: s.substring(0, 200) + "..." });
+  }
+  
+  // Last resort: if we still don't have bullets, try to create them from the text
+  if (!s.includes('• ') && s.includes('. ')) {
+    log("[normalizeOutline] No bullets found, creating them from sentences...");
+    const sentences = s.split(/\.\s+/)
+      .map(sentence => sentence.trim())
+      .filter(sentence => sentence.length > 10)
+      .map(sentence => `• ${sentence}.`);
+    s = sentences.join('\n');
+    log("[normalizeOutline] After creating bullets from sentences:", { text: s.substring(0, 200) + "..." });
+  }
+  
+  // Absolute last resort: if we have no sentence boundaries, try to split on common conjunctions
+  if (!s.includes('\n') && !s.includes('. ') && s.length > 100) {
+    log("[normalizeOutline] No sentence boundaries, trying conjunction-based splitting...");
+    const parts = s.split(/\s+(?:and|but|however|meanwhile|additionally|furthermore|moreover|also|while|although|despite|nevertheless)\s+/i)
+      .map(part => part.trim())
+      .filter(part => part.length > 20)
+      .map(part => `• ${part}.`);
+    if (parts.length > 1) {
+      s = parts.join('\n');
+      log("[normalizeOutline] After conjunction-based splitting:", { text: s.substring(0, 200) + "..." });
+    }
+  }
+  
+  // Final fallback: if we still have no structure, try to create artificial breaks
+  if (!s.includes('\n') && s.length > 150) {
+    log("[normalizeOutline] No structure found, creating artificial breaks...");
+    const words = s.split(/\s+/);
+    const wordsPerBullet = Math.ceil(words.length / 6); // Aim for 6 bullets
+    const bullets = [];
+    for (let i = 0; i < words.length; i += wordsPerBullet) {
+      const chunk = words.slice(i, i + wordsPerBullet).join(' ');
+      if (chunk.trim().length > 10) {
+        bullets.push(`• ${chunk.trim()}.`);
+      }
+    }
+    if (bullets.length > 1) {
+      s = bullets.join('\n');
+      log("[normalizeOutline] After creating artificial breaks:", { text: s.substring(0, 200) + "..." });
+    }
+  }
+  
+  // If we still have no structure at all, just return the text as a single bullet
+  if (!s.includes('\n') && !s.includes('• ')) {
+    log("[normalizeOutline] No structure at all, creating single bullet...");
+    s = `• ${s.trim()}.`;
+  }
+  
+  // Final validation: ensure we have at least one bullet
+  if (!s.includes('• ')) {
+    log("[normalizeOutline] No bullets found after all processing, creating fallback...");
+    s = `• ${s.trim()}.`;
+  }
+  
+  // Ensure we have proper line breaks for the final processing
+  if (!s.includes('\n')) {
+    log("[normalizeOutline] Adding line breaks for final processing...");
+    s = s.replace(/•\s+/g, '\n• ').replace(/^\n/, '').trim();
+  }
+  
+  // Log the final text before line processing
+  log("[normalizeOutline] Final text before line processing:", { text: s.substring(0, 300) + "..." });
 
   // Split into lines and process each bullet
   let lines = s.split(/\n+/)
@@ -59,6 +218,10 @@ function normalizeOutline(text){
       if (l.length > 2) {
         l = "• " + l[2].toUpperCase() + l.slice(3);
       }
+      // Ensure each bullet ends with a period
+      if (!l.endsWith('.') && !l.endsWith('!') && !l.endsWith('?')) {
+        l += '.';
+      }
       return l;
     });
 
@@ -72,7 +235,9 @@ function normalizeOutline(text){
   }).slice(0, 8);
   
   // Join with proper line breaks
-  return lines.join("\n");
+  const result = lines.join("\n");
+  log("[normalizeOutline] Final output:", { length: result.length, text: result.substring(0, 200) + "..." });
+  return result;
 }
 
 function normalizeParagraph(text){
@@ -94,6 +259,7 @@ function normalizeOutput(text, mode){
   
   if (mode === "outline") {
     // For outline mode, preserve the bullet structure and line breaks
+    log("[normalizeOutput] Processing outline mode");
     return normalizeOutline(raw);
   }
 
@@ -118,6 +284,14 @@ Return 5–8 one-line bullets. Each bullet should be on its own line.
 Prefix each bullet with "• " (Unicode bullet) exactly.
 No sub-bullets. No numbering. No extra commentary.
 Each bullet should be a complete, standalone sentence.
+IMPORTANT: Each bullet point must be on a separate line with a line break between them.
+CRITICAL: Do not put all bullets in one paragraph. Each bullet must be on its own line.
+CRITICAL: Each bullet must end with a period and be followed by a line break.
+Format example:
+• First bullet point here.
+• Second bullet point here.
+• Third bullet point here.
+
 Text to summarize:
 ${text}`;
   }
@@ -310,7 +484,9 @@ function fallbackByMode(text, mode) {
   const sents = clean.split(/(?<=[.!?])\s+/);
 
   if (mode === "outline") {
-    return sents.slice(0, 8).map(s => `• ${s.replace(/^[•\*\-]\s+/, "").trim()}`).join("\n");
+    const outline = sents.slice(0, 8).map(s => `• ${s.replace(/^[•\*\-]\s+/, "").trim()}`).join("\n");
+    log("[fallback] outline generated:", { outputLength: outline.length, output: outline.substring(0, 200) + "..." });
+    return outline;
   }
   if (mode === "detailed") {
     const mid  = Math.floor(sents.length / 2);
@@ -344,8 +520,10 @@ async function summarize(rawText, { mode = "tldr" } = {}) {
   if (PROVIDER === "gemini") {
     const g = await callGemini(prompt, { maxTokens });
     if (g) {
-      log("[AI] Gemini response:", { outputLength: g.length });
-      return normalizeOutput(g, mode);
+      log("[AI] Gemini response:", { outputLength: g.length, output: g.substring(0, 100) + "..." });
+      const normalized = normalizeOutput(g, mode);
+      log("[AI] Normalized output:", { mode, outputLength: normalized.length, output: normalized.substring(0, 200) + "..." });
+      return normalized;
     }
   }
 
@@ -359,7 +537,9 @@ async function summarize(rawText, { mode = "tldr" } = {}) {
   
   if (o) {
     log("[AI] OpenAI response:", { outputLength: o.length, output: o.substring(0, 100) + "..." });
-    return normalizeOutput(o, mode);
+    const normalized = normalizeOutput(o, mode);
+    log("[AI] Normalized output:", { mode, outputLength: normalized.length, output: normalized.substring(0, 200) + "..." });
+    return normalized;
   }
 
   log("[fallback] local summarizer");

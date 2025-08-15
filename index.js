@@ -129,7 +129,7 @@ app.use(morgan("dev"));
    ────────────────────────────────────────────────────────────────────────── */
 app.get("/api/health", (_req, res) =>
   res.json({ ok: true, env: process.env.NODE_ENV || "development" })
-);
+); 
 app.get("/api/openapi.json", (_req, res) => res.json(spec));
 app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(spec, {
   explorer: true,

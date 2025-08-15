@@ -15,4 +15,8 @@ router.delete("/:id", ctrl.remove);
 router.get("/daily/:date", ctrl.getDaily);
 router.post("/daily/:date/generate", ctrl.generateDaily);
 
+// Calendar sync
+router.post("/sync-to-calendar", ctrl.syncToCalendar);
+router.post("/daily/:date/sync-to-calendar", ctrl.syncDateToCalendar);
+
 module.exports = router;

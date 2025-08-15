@@ -1,7 +1,6 @@
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
-
-function ymd(d = new Date()) { return new Date(d).toISOString().slice(0,10); }
+const { ymd } = require("../utils/date");
 
 const CalendarEventSchema = new Schema({
   createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },

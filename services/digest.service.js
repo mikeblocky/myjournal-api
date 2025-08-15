@@ -3,10 +3,10 @@ const Article = require("../models/Article");
 const { summarize, topicIdeas } = require("./ai.service");
 const { fetchNewsItems } = require("./news.service");
 const { fetchAndParse } = require("./reader.service");
+const { ymd } = require("../utils/date");
 
 const DIGEST_DEBUG = process.env.DIGEST_DEBUG === "true";
 
-function ymd(d=new Date()){ return new Date(d).toISOString().slice(0,10); }
 function hoursSince(d){ return (Date.now() - new Date(d||Date.now()).getTime()) / 36e5; }
 function uniq(arr){ return Array.from(new Set(arr)); }
 function log(...a){ if (DIGEST_DEBUG) console.log("[DIGEST]", ...a); }

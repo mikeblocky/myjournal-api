@@ -1,9 +1,10 @@
 const Note = require("../models/Note");
 const NoteDaily = require("../models/NoteDaily");
+const CalendarEvent = require("../models/CalendarEvent");
 const { summarize } = require("../services/ai.service");
+const { ymd } = require("../utils/date");
 
 function escRegex(s=""){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-function ymd(d=new Date()){ return new Date(d).toISOString().slice(0,10); }
 
 async function list(req, res, next){
   try{
@@ -134,7 +135,96 @@ async function generateDaily(req, res, next){
   }catch(e){ next(e); }
 }
 
+/* ---- Calendar Sync ---- */
+
+async function syncToCalendar(req, res, next){
+  try{
+    const { noteId, startTime="09:00", endTime="10:00", allDay=false, location="", color="" } = req.body || {};
+    if (!noteId) return res.status(400).json({ error: "noteId is required" });
+
+    const note = await Note.findOne({ _id: noteId, createdBy: req.userId });
+    if (!note) return res.status(404).json({ error: "Note not found" });
+
+    // Create calendar event from note
+    const event = await CalendarEvent.create({
+      createdBy: req.userId,
+      title: note.title || "Note",
+      date: note.date,
+      startTime: allDay ? "" : startTime,
+      endTime: allDay ? "" : endTime,
+      allDay: allDay,
+      location: location || "",
+      description: note.body || "",
+      color: color || "",
+      tags: note.tags || []
+    });
+
+    res.status(201).json({ 
+      item: event.toPublic(),
+      message: "Note synced to calendar successfully"
+    });
+  }catch(e){ next(e); }
+}
+
+// Sync multiple notes for a specific date
+async function syncDateToCalendar(req, res, next){
+  try{
+    const date = String(req.params.date || "").slice(0,10);
+    if (!date) return res.status(400).json({ error: "date required (YYYY-MM-DD)" });
+
+    const { startTime="09:00", endTime="10:00", allDay=false, location="", color="" } = req.body || {};
+
+    const notes = await Note.find({ createdBy: req.userId, date }).sort({ pinned: -1, updatedAt: -1 });
+    if (!notes.length) return res.status(400).json({ error: "No notes found for this date" });
+
+    const events = [];
+    let timeOffset = 0;
+
+    for (const note of notes) {
+      if (!note.title && !note.body) continue; // Skip empty notes
+
+      let eventStartTime = "";
+      let eventEndTime = "";
+
+      if (!allDay) {
+        // Calculate time slots for multiple notes
+        const startHour = parseInt(startTime.split(':')[0]);
+        const startMinute = parseInt(startTime.split(':')[1]);
+        const startMinutes = startHour * 60 + startMinute + timeOffset;
+        
+        const endMinutes = startMinutes + 30; // 30-minute slots
+        
+        eventStartTime = `${Math.floor(startMinutes / 60).toString().padStart(2, '0')}:${(startMinutes % 60).toString().padStart(2, '0')}`;
+        eventEndTime = `${Math.floor(endMinutes / 60).toString().padStart(2, '0')}:${(endMinutes % 60).toString().padStart(2, '0')}`;
+        
+        timeOffset += 30; // Next event 30 minutes later
+      }
+
+      const event = await CalendarEvent.create({
+        createdBy: req.userId,
+        title: note.title || "Note",
+        date: note.date,
+        startTime: eventStartTime,
+        endTime: eventEndTime,
+        allDay: allDay,
+        location: location || "",
+        description: note.body || "",
+        color: color || "",
+        tags: note.tags || []
+      });
+
+      events.push(event.toPublic());
+    }
+
+    res.status(201).json({ 
+      items: events,
+      message: `Synced ${events.length} notes to calendar for ${date}`
+    });
+  }catch(e){ next(e); }
+}
+
 module.exports = {
   list, create, getOne, update, remove,
-  getDaily, generateDaily
+  getDaily, generateDaily,
+  syncToCalendar, syncDateToCalendar
 };
