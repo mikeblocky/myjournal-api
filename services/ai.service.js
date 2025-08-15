@@ -125,6 +125,24 @@ function normalizeOutline(text){
     log("[normalizeOutline] After splitting multiple bullets:", { text: s.substring(0, 200) + "..." });
   }
   
+  // NEW: Handle the specific case where AI returns "• Point 1. • Point 2. • Point 3" as one line
+  // This is the exact issue described by the user
+  if (s.includes('• ') && s.includes('. ') && !s.includes('\n') && (s.match(/•/g) || []).length > 1) {
+    log("[normalizeOutline] Found continuous bullet text without line breaks, fixing...");
+    // Split on bullet markers and ensure each gets its own line
+    const bullets = s.split(/•\s+/)
+      .filter(part => part.trim().length > 0)
+      .map(part => {
+        let bullet = part.trim();
+        // Remove trailing punctuation and add clean period
+        bullet = bullet.replace(/[.!?]+$/, '');
+        bullet = bullet + '.';
+        return `• ${bullet}`;
+      });
+    s = bullets.join('\n');
+    log("[normalizeOutline] After fixing continuous bullet text:", { text: s.substring(0, 200) + "..." });
+  }
+  
   // Final cleanup: ensure we have proper line breaks and no extra whitespace
   s = s.replace(/\n\s+/g, '\n') // Remove leading whitespace on lines
        .replace(/\s+\n/g, '\n') // Remove trailing whitespace on lines
@@ -287,7 +305,8 @@ Each bullet should be a complete, standalone sentence.
 IMPORTANT: Each bullet point must be on a separate line with a line break between them.
 CRITICAL: Do not put all bullets in one paragraph. Each bullet must be on its own line.
 CRITICAL: Each bullet must end with a period and be followed by a line break.
-Format example:
+CRITICAL: Use actual line breaks (\\n), not just spaces or periods.
+CRITICAL: The output should look like this exact format with line breaks:
 • First bullet point here.
 • Second bullet point here.
 • Third bullet point here.
