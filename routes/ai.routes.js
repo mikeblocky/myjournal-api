@@ -1,3 +1,4 @@
+// backend/src/routes/ai.routes.js
 const router = require("express").Router();
 const { authRequired } = require("../middleware/auth");
 const Article = require("../models/Article");
@@ -13,8 +14,8 @@ router.post("/summarize", async (req, res) => {
     if (!input && articleId) {
       const a = await Article.findOne({ _id: articleId, createdBy: req.userId }).lean();
       if (!a) return res.status(404).json({ error: "Article not found" });
-      input = (a.contentHTML && a.contentHTML.trim()) ||
-              [a.title || "", a.excerpt || ""].filter(Boolean).join(". ");
+      input = (a.contentHTML && a.contentHTML.trim())
+           || [a.title || "", a.excerpt || ""].filter(Boolean).join(". ");
     }
 
     if (!input) return res.status(400).json({ error: "No text to summarize" });

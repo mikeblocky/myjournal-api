@@ -1,17 +1,17 @@
 // backend/src/services/ai.service.js
 "use strict";
 
-// ---------- Env & defaults ----------
-const PROVIDER     = (process.env.AI_PROVIDER || "openai").toLowerCase(); // "openai" | "gemini"
-const GEMINI_MODEL = process.env.GEMINI_MODEL  || "gemini-2.0-flash";
+/* -------------------- Env & defaults -------------------- */
+const PROVIDER      = (process.env.AI_PROVIDER || "openai").toLowerCase(); // "openai" | "gemini"
+const GEMINI_MODEL  = process.env.GEMINI_MODEL  || "gemini-2.0-flash";
 
-const OPENAI_MODEL = process.env.AI_MODEL     || "gpt-4o-mini";
-const OPENAI_BASE  = process.env.AI_API_BASE  || "https://api.openai.com/v1/chat/completions";
+const OPENAI_MODEL  = process.env.AI_MODEL      || "gpt-4o-mini";
+const OPENAI_BASE   = process.env.AI_API_BASE   || "https://api.openai.com/v1/chat/completions";
 
-// Optional temperature: only send if AI_TEMPERATURE is set and numeric
-const TEMP_ENV   = process.env.AI_TEMPERATURE;
-const HAS_TEMP   = TEMP_ENV !== undefined && TEMP_ENV !== "" && !Number.isNaN(Number(TEMP_ENV));
-const TEMP_VALUE = HAS_TEMP ? Number(TEMP_ENV) : null;
+// Only include temperature if AI_TEMPERATURE is explicitly set
+const TEMP_ENV      = process.env.AI_TEMPERATURE;
+const HAS_TEMP      = TEMP_ENV !== undefined && TEMP_ENV !== "" && !Number.isNaN(Number(TEMP_ENV));
+const TEMP_VALUE    = HAS_TEMP ? Number(TEMP_ENV) : null;
 
 const MAX_INPUT_CHARS = Number(process.env.AI_MAX_INPUT_CHARS || 16000);
 const TOKENS_TLDR     = Number(process.env.AI_MAX_TOKENS      || 220);
@@ -19,16 +19,15 @@ const TOKENS_DETAILED = Number(process.env.AI_DETAILED_TOKENS || 480);
 const TOKENS_OUTLINE  = Number(process.env.AI_OUTLINE_TOKENS  || 420);
 
 const AI_DEBUG = process.env.AI_DEBUG === "true";
-
 function log(...a){ if (AI_DEBUG) console.log("[AI]", ...a); }
 function logErr(...a){ console.error("[AI]", ...a); }
 
-// ---------- Text utils ----------
+/* -------------------- Text utils -------------------- */
 function stripHtml(s = "") { return String(s).replace(/<[^>]+>/g, " "); }
 function compress(s = "")  { return String(s).replace(/\s+/g, " ").trim(); }
 function truncate(s = "", n = MAX_INPUT_CHARS) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
-// ---------- Output normalizers ----------
+/* -------------------- Output normalizers -------------------- */
 function removeInlineEmphasis(s=""){
   return s
     .replace(/(\*\*|__)(.*?)\1/g, "$2")
@@ -79,7 +78,7 @@ function normalizeOutput(text, mode){
   return compress(cleaned);
 }
 
-// ---------- Prompt builder ----------
+/* -------------------- Prompt builder -------------------- */
 function buildPrompt(text, mode) {
   const base =
     "Plain text only. No markdown or inline formatting (no *, _, #, backticks). " +
@@ -107,7 +106,7 @@ Text:
 ${text}`;
 }
 
-// ---------- Providers ----------
+/* -------------------- Providers -------------------- */
 async function callGemini(text, { maxTokens }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return null;
@@ -115,24 +114,20 @@ async function callGemini(text, { maxTokens }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
     contents: [{ parts: [{ text }] }],
-    generationConfig: { maxOutputTokens: maxTokens, temperature: 0.2 }
+    generationConfig: { maxOutputTokens: maxTokens, temperature: 0.2 } // Gemini tolerates 0.2 well
   };
 
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const json = await res.json().catch(() => ({}));
 
     if (!res.ok) { logErr("[Gemini] HTTP", res.status, json); return null; }
 
-    const cand   = json?.candidates?.[0];
-    const out    = cand?.content?.parts?.map(p => p?.text).filter(Boolean).join("\n").trim();
+    const cand = json?.candidates?.[0];
+    const out  = cand?.content?.parts?.map(p => p?.text).filter(Boolean).join("\n").trim();
     if (out) return out;
-    const finish = cand?.finishReason;
-    logErr("[Gemini] finishReason:", finish);
+
+    logErr("[Gemini] finishReason:", cand?.finishReason);
     return null;
   } catch (e) {
     logErr("[Gemini] exception:", e);
@@ -140,14 +135,13 @@ async function callGemini(text, { maxTokens }) {
   }
 }
 
-function isResponsesAPI() {
-  return /\/responses\b/.test(OPENAI_BASE);
-}
+function isResponsesAPI() { return /\/responses\b/.test(OPENAI_BASE); }
 
 async function callOpenAI(messages, { maxTokens }) {
   const key = process.env.AI_API_KEY;
   if (!key) return null;
 
+  // Helper for POST
   async function post(body) {
     const res  = await fetch(OPENAI_BASE, {
       method: "POST",
@@ -158,19 +152,20 @@ async function callOpenAI(messages, { maxTokens }) {
     return { res, json };
   }
 
-  // Responses API path
+  // Responses API path (we join messages into one text block to keep it simple)
   if (isResponsesAPI()) {
+    const joined = messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n\n");
     const payload = {
       model: OPENAI_MODEL,
-      input: messages,
+      input: joined,
       max_output_tokens: maxTokens
     };
     if (TEMP_VALUE !== null) payload.temperature = TEMP_VALUE;
 
     let { res, json } = await post(payload);
 
-    // If temperature unsupported, retry without it
-    if (!res.ok && json?.error?.param === "temperature") {
+    // If temperature unsupported → retry without it
+    if (!res.ok && (json?.error?.param === "temperature" || /temperature/.test(json?.error?.message || ""))) {
       delete payload.temperature;
       ({ res, json } = await post(payload));
     }
@@ -179,12 +174,11 @@ async function callOpenAI(messages, { maxTokens }) {
       const out =
         json.output_text ||
         json?.output?.[0]?.content?.[0]?.text ||
-        json?.choices?.[0]?.message?.content ||
-        "";
+        json?.choices?.[0]?.message?.content || "";
       return (out || "").trim() || null;
     }
 
-    // Retry on 429/5xx a couple times
+    // Retry on 429/5xx
     if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
       for (let i = 0; i < 2; i++) {
         await new Promise(r => setTimeout(r, 400 * (i + 1) ** 2));
@@ -193,8 +187,7 @@ async function callOpenAI(messages, { maxTokens }) {
           const out =
             json.output_text ||
             json?.output?.[0]?.content?.[0]?.text ||
-            json?.choices?.[0]?.message?.content ||
-            "";
+            json?.choices?.[0]?.message?.content || "";
           return (out || "").trim() || null;
         }
       }
@@ -205,35 +198,36 @@ async function callOpenAI(messages, { maxTokens }) {
   }
 
   // Chat Completions path
+  // Strategy: try max_completion_tokens first (works with gpt-5*), then fall back to max_tokens.
   const basePayload = { model: OPENAI_MODEL, messages };
   if (TEMP_VALUE !== null) basePayload.temperature = TEMP_VALUE;
 
-  // 1) try with max_tokens
-  let { res, json } = await post({ ...basePayload, max_tokens: maxTokens });
+  // 1) Try with max_completion_tokens
+  let { res, json } = await post({ ...basePayload, max_completion_tokens: maxTokens });
 
-  // If temperature unsupported → retry without it
-  if (!res.ok && json?.error?.param === "temperature") {
+  // If temperature unsupported → retry without it (same param set)
+  if (!res.ok && (json?.error?.param === "temperature" || /temperature/.test(json?.error?.message || ""))) {
     const b = { ...basePayload };
     delete b.temperature;
-    ({ res, json } = await post({ ...b, max_tokens: maxTokens }));
+    ({ res, json } = await post({ ...b, max_completion_tokens: maxTokens }));
   }
 
   if (res.ok) return json?.choices?.[0]?.message?.content?.trim() || null;
 
-  // 2) model rejects max_tokens → use max_completion_tokens
+  // 2) Some older models want max_tokens instead
   const param  = json?.error?.param || "";
   const msg    = (json?.error?.message || "").toLowerCase();
-  const badMax = param === "max_tokens" || /max[_ ]tokens/.test(param) || msg.includes("max_tokens");
-  if (res.status === 400 && badMax) {
-    let b = { ...basePayload, max_completion_tokens: maxTokens };
-    // if previous error said temperature unsupported, keep it off
-    if (json?.error?.param === "temperature") delete b.temperature;
+  const badMCT = param === "max_completion_tokens" || msg.includes("max_completion_tokens");
+  if (res.status === 400 && badMCT) {
+    let b = { ...basePayload, max_tokens: maxTokens };
+    // if previous error indicated temperature unsupported, keep it off
+    if (param === "temperature" || /temperature/.test(msg)) delete b.temperature;
 
     ({ res, json } = await post(b));
     if (res.ok) return json?.choices?.[0]?.message?.content?.trim() || null;
   }
 
-  // 3) gentle retry for 429/5xx (with max_completion_tokens)
+  // 3) Gentle retry for 429/5xx (prefer max_completion_tokens)
   if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
     for (let i = 0; i < 2; i++) {
       await new Promise(r => setTimeout(r, 400 * (i + 1) ** 2));
@@ -246,7 +240,7 @@ async function callOpenAI(messages, { maxTokens }) {
   return null;
 }
 
-// ---------- Local fallback ----------
+/* -------------------- Local fallback -------------------- */
 function fallbackByMode(text, mode) {
   const clean = compress(stripHtml(text));
   if (!clean) return "";
@@ -264,7 +258,7 @@ function fallbackByMode(text, mode) {
   return normalizeParagraph(sents.slice(0, 3).join(" "));
 }
 
-// ---------- Public API ----------
+/* -------------------- Public API -------------------- */
 async function summarize(rawText, { mode = "tldr" } = {}) {
   const text = truncate(compress(stripHtml(rawText || "")));
   if (!text) return "";
